@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Кнопка "Run workflow" на вкладке Actions: запустить проверку вручную,
+  # например сразу после изменения в marketplace-api
+  workflow_dispatch:
+  # Раз в сутки (06:00 UTC): изменение в marketplace-api само по себе этот CI не запускает
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Свежая спецификация из main marketplace-api -> src/api/schema.d.ts
+      - name: Download API spec and generate types
+        run: npm run gen:api
+
+      # Не падаем, а предупреждаем: контракт API поменялся относительно закоммиченных типов
+      - name: Show API contract changes
+        run: |
+          if ! git diff --exit-code src/api/schema.d.ts; then
+            echo "::warning::Marketplace API contract changed. Run npm run gen:api and commit src/api/schema.d.ts"
+          fi
+
+      # Здесь ловятся изменения API: код BFF и моки на типах сверяются со свежими типами
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+  schema-breaking-changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: git fetch --depth=1 origin ${{ github.base_ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Сравнивает schema.graphql из ветки PR со schema.graphql из main и падает на breaking changes
+      - name: GraphQL Inspector
+        run: npx graphql-inspector diff "git:origin/${{ github.base_ref }}:schema.graphql" schema.graphql

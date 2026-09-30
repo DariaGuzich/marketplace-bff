@@ -1,0 +1,22 @@
+"Настройки маркетплейса для аккаунта"
+type Settings {
+  floorPrice: Float!
+  currency: String!
+  blockedDomains: [String!]!
+}
+
+input SettingsInput {
+  floorPrice: Float!
+  currency: String!
+  blockedDomains: [String!]!
+}
+
+type Query {
+  "Настройки аккаунта или null, если они ещё не сохранены"
+  settings(accountId: ID!): Settings
+}
+
+type Mutation {
+  "Полностью заменяет настройки аккаунта"
+  updateSettings(accountId: ID!, input: SettingsInput!): Settings!
+}

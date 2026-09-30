@@ -1,0 +1,26 @@
+{
+  "name": "marketplace-bff",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "gen:api": "openapi-typescript https://raw.githubusercontent.com/DariaGuzich/marketplace-api/main/openapi.json -o src/api/schema.d.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "schema:diff": "graphql-inspector diff git:origin/main:schema.graphql schema.graphql"
+  },
+  "dependencies": {
+    "graphql": "^17.0.2",
+    "graphql-yoga": "^5.24.1",
+    "openapi-fetch": "^0.17.0"
+  },
+  "devDependencies": {
+    "@graphql-inspector/cli": "^7.0.0",
+    "@types/node": "^22.20.4",
+    "msw": "^2.15.0",
+    "openapi-typescript": "^7.13.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.2"
+  }
+}
