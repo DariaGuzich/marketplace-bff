@@ -1,11 +1,11 @@
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { ApiSettings } from "../src/api/client.js";
+import type { ApiSettings, ApiSettingsValues } from "../src/api/client.js";
 import { API_URL, executeGraphQL } from "./execute.js";
 
 // Вариант 2: мок API на сгенерированных OpenAPI-типах.
-// Данные мока объявлены как ApiSettings. Если API изменится и после npm run gen:api
+// Данные мока объявлены как ApiSettings / ApiSettingsValues. Если API изменится и после npm run gen:api
 // тип станет другим, npm run typecheck упадёт прямо на этих объектах.
 // Важно: vitest сам типы не проверяет, эту работу делает tsc.
 
@@ -16,7 +16,7 @@ afterAll(() => server.close());
 
 describe("resolvers (typed mock)", () => {
   it("settings: maps API response to camelCase", async () => {
-    const apiSettings: ApiSettings = { floor_price: 1.5, currency: "USD", blocked_domains: ["bad.com"] };
+    const apiSettings: ApiSettings = { floor_price: 1.5, currency: "USD", blocked_domains: ["bad.com"], version: 3 };
     server.use(http.get(`${API_URL}/accounts/:accountId/settings`, () => HttpResponse.json(apiSettings)));
 
     const result = await executeGraphQL(`
@@ -39,12 +39,13 @@ describe("resolvers (typed mock)", () => {
   });
 
   it("updateSettings: sends snake_case body to API", async () => {
-    const expectedBody: ApiSettings = { floor_price: 2, currency: "EUR", blocked_domains: [] };
+    const expectedBody: ApiSettingsValues = { floor_price: 2, currency: "EUR", blocked_domains: [] };
+    const apiResponse: ApiSettings = { ...expectedBody, version: 4 };
     let receivedBody: unknown;
     server.use(
       http.put(`${API_URL}/accounts/:accountId/settings`, async ({ request }) => {
         receivedBody = await request.json();
-        return HttpResponse.json(expectedBody);
+        return HttpResponse.json(apiResponse);
       }),
     );
 

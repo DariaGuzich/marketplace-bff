@@ -28,6 +28,13 @@ export interface components {
             blocked_domains: string[];
             currency: string;
             floor_price: number;
+            /** Format: int64 */
+            version: number;
+        };
+        SettingsValues: {
+            blocked_domains: string[];
+            currency: string;
+            floor_price: number;
         };
     };
     responses: never;
@@ -78,7 +85,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["Settings"];
+                "application/json": components["schemas"]["SettingsValues"];
             };
         };
         responses: {

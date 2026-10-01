@@ -1,5 +1,5 @@
 import { GraphQLError } from "graphql";
-import type { ApiClient, ApiSettings } from "./api/client.js";
+import type { ApiClient, ApiSettings, ApiSettingsValues } from "./api/client.js";
 
 // Настройки в том виде, в каком их видит GraphQL (camelCase), см. schema.graphql
 type Settings = {
@@ -18,7 +18,7 @@ function fromApi(settings: ApiSettings): Settings {
   };
 }
 
-function toApi(settings: Settings): ApiSettings {
+function toApi(settings: Settings): ApiSettingsValues {
   return {
     floor_price: settings.floorPrice,
     currency: settings.currency,
