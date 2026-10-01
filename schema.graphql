@@ -3,6 +3,23 @@ type Settings {
   floorPrice: Float!
   currency: String!
   blockedDomains: [String!]!
+  "Аккаунт, которому принадлежат настройки. Вместе с Account.settings образует цикл: account → settings → account → …"
+  account: Account!
+}
+
+type Account {
+  id: ID!
+  "Настройки или null, если они ещё не сохранены"
+  settings: Settings
+  "Почасовая статистика из Reporting. null с ошибкой в errors, если Reporting недоступен"
+  report: [HourlyStats!]
+}
+
+"Агрегат за один час (UTC)"
+type HourlyStats {
+  hour: String!
+  requests: Int!
+  shown: Int!
 }
 
 input SettingsInput {
@@ -14,9 +31,13 @@ input SettingsInput {
 type Query {
   "Настройки аккаунта или null, если они ещё не сохранены"
   settings(accountId: ID!): Settings
+  "Все аккаунты, у которых есть настройки"
+  accounts: [Account!]!
 }
 
 type Mutation {
   "Полностью заменяет настройки аккаунта"
   updateSettings(accountId: ID!, input: SettingsInput!): Settings!
+  "Добавляет домен в список заблокированных. При сбое BFF повторяет запрос к API с тем же Idempotency-Key"
+  addBlockedDomain(accountId: ID!, domain: String!): Settings!
 }
