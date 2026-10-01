@@ -4,8 +4,8 @@ GraphQL-слой (Backend For Frontend) между UI и Marketplace API. Изо
 UI видит только GraphQL-схему (`schema.graphql`). Изменения REST API BFF поглощает в резолверах.
 
 ```
-marketplace-ui  →  marketplace-bff (этот репозиторий)  →  marketplace-api
-                   GraphQL, camelCase                     REST, snake_case
+marketplace-ui  →  marketplace-bff (этот репозиторий)  →  marketplace-api        (настройки, REST, snake_case)
+                   GraphQL, camelCase                  →  marketplace-reporting  (статистика, Account.report)
 ```
 
 ## Как устроено
@@ -14,9 +14,11 @@ marketplace-ui  →  marketplace-bff (этот репозиторий)  →  mar
 |---|---|---|
 | `schema.graphql` | GraphQL-схема — контракт с UI | руками |
 | `src/api/schema.d.ts` | TypeScript-типы REST API | **генерируется** `npm run gen:api`, руками не править |
-| `src/api/client.ts` | типизированный клиент API (openapi-fetch) | руками |
-| `src/resolvers.ts` | резолверы: вызывают API, snake_case ↔ camelCase | руками |
-| `src/server.ts` | сборка GraphQL-сервера (Yoga) | руками |
+| `src/api/client.ts` | типизированный клиент API (openapi-fetch) с таймаутом | руками |
+| `src/reporting/client.ts` | клиент Reporting с таймаутом (тип ответа описан руками) | руками |
+| `src/settings-loader.ts` | DataLoader: настройки многих аккаунтов одним batch-запросом | руками |
+| `src/resolvers.ts` | резолверы: вызывают API и Reporting, snake_case ↔ camelCase, retry мутации | руками |
+| `src/server.ts` | сборка GraphQL-сервера (Yoga), контекст запроса, лимиты GraphQL Armor | руками |
 | `src/index.ts` | точка входа: порт и адрес API из переменных окружения | руками |
 
 ## Запуск
@@ -32,6 +34,11 @@ npm start
 |---|---|---|
 | `PORT` | `4000` | порт BFF |
 | `API_URL` | `http://localhost:8080` | адрес marketplace-api |
+| `REPORTING_URL` | `http://localhost:8082` | адрес marketplace-reporting |
+| `API_TIMEOUT_MS` / `REPORTING_TIMEOUT_MS` | `2000` / `1000` | таймауты вызовов |
+| `USE_DATALOADER` | `true` | `false` — наивная реализация `Account.settings` (N+1) |
+| `RETRY_ATTEMPTS` / `RETRY_DELAY_MS` | `3` / `200` | повторы мутации `addBlockedDomain` |
+| `MAX_DEPTH` / `MAX_COST` | `6` / `1000` | лимиты GraphQL Armor |
 
 PowerShell: `$env:PORT=4001; $env:API_URL="http://localhost:9090"; npm start`
 
@@ -51,6 +58,73 @@ query {
 
 Для аккаунта без сохранённых настроек `settings` вернёт `null` (API в этом случае отвечает 404).
 
+## N+1, лимиты, отказ сервиса, retry
+
+Каждый вызов API и Reporting пишется в лог BFF: `[api] GET /accounts`, `[reporting] GET /reports/acc-1`.
+
+### N+1 и DataLoader
+
+Запрос `accounts { id settings { ... } }`: резолвер `Account.settings` вызывается **для каждого аккаунта
+отдельно**. Наивно каждый вызов — запрос в API: 1 запрос за списком + N за настройками (**N+1**).
+На 1000 аккаунтов — 1001 HTTP-запрос на один GraphQL-запрос.
+
+**DataLoader** (`src/settings-loader.ts`) собирает все `load(accountId)`, сделанные в одном «тике» выполнения,
+и вызывает batch-функцию один раз: `GET /settings?account_ids=a&account_ids=b&...`. Итог — **2 запроса**
+при любом N. Для этого в API нужен batch-эндпоинт. DataLoader создаётся заново на каждый GraphQL-запрос
+(в `context`), чтобы его кэш не смешивал данные разных запросов и пользователей.
+
+`USE_DATALOADER=false` включает наивный вариант, чтобы сравнить. Автотест `test/n-plus-one.test.ts` считает
+запросы, которые получил мок API: 1 + 3 против 2.
+
+У `Account.report` тот же N+1 (запрос в Reporting на каждый аккаунт): batch-эндпоинта у Reporting нет,
+это оставлено как есть.
+
+### Лимиты глубины и сложности (GraphQL Armor)
+
+Связь `Settings.account` и `Account.settings` образует цикл, поэтому клиент может прислать запрос любой
+глубины: `accounts { settings { account { settings { account { ... } } } } }`. А с помощью псевдонимов
+(aliases) — запрос любой ширины: `a1: settings(...) {...} a2: settings(...) {...} ...`. Один такой запрос
+способен нагрузить BFF и API. Плагины GraphQL Armor проверяют запрос **до выполнения** и отклоняют его:
+
+| Плагин | Лимит | Как считает |
+|---|---|---|
+| `maxDepthPlugin` | глубина 6 | число уровней вложенности, включая последнее скалярное поле |
+| `costLimitPlugin` | стоимость 1000 | объект 2, скалярное поле 1, с множителем 1.5 за глубину. `settings(...) { 3 поля }` = 6.5, `accounts { id settings {3 поля} report {3 поля} }` = 23 |
+
+Ответ на отклонённый запрос: `Syntax Error: Query depth limit of 6 exceeded, found 8.` или
+`Query Cost limit of 1000 exceeded, found 1950.`. В API при этом не уходит ни одного запроса.
+Introspection (её делает GraphiQL) лимитами не ограничивается.
+
+Стоимость оценивается по запросу, а не по данным: `accounts` стоит одинаково для 3 и для 3000 аккаунтов.
+Чтобы учитывать размер списков, нужна пагинация с лимитом (`accounts(first: 50)`).
+
+### Отказ сервиса за BFF и таймауты
+
+`Account.report` берётся из Reporting. Если Reporting упал или не ответил за `REPORTING_TIMEOUT_MS`,
+резолвер бросает ошибку. Поле `report` nullable, поэтому GraphQL возвращает **частичный ответ**: настройки
+в `data`, `report: null`, а ошибка — в `errors` с путём `["accounts", 0, "report"]`. Если бы поле было
+`[HourlyStats!]!` (non-null), `null` поднялся бы до ближайшего nullable-родителя. Здесь `Account` в `[Account!]!`
+и `accounts` тоже non-null, поэтому пропал бы весь ответ (`data: null`) из-за одного недоступного сервиса.
+Nullable-поля — это места, где GraphQL может отдать частичный результат.
+
+Без таймаута медленный Reporting задержал бы весь ответ, включая настройки. Автотест
+`test/reporting-failure.test.ts`: Reporting отвечает 500 или через 1 с при таймауте 200 мс.
+
+### Retry и идемпотентность (`addBlockedDomain`)
+
+Добавление домена в API неидемпотентно. Если повторить запрос после таймаута, а первая попытка на самом
+деле дошла, домен добавится дважды. Поэтому BFF:
+- создаёт `Idempotency-Key` (UUID) **один раз на мутацию**;
+- при сетевой ошибке, таймауте или 5xx повторяет запрос **с тем же ключом** (`RETRY_ATTEMPTS` попыток);
+- 4xx не повторяет: повтор не исправит «нет настроек» или конфликт.
+
+API по ключу узнаёт повтор и возвращает сохранённый ответ. Автотест `test/retry.test.ts`: первая попытка
+дошла до API (домен добавлен), но ответ потерялся (503). Повтор с тем же ключом → домен добавлен один раз.
+
+`updateSettings` (PUT) не повторяется автоматически. PUT идемпотентен, но повтор после потерянного ответа
+может перезаписать чужое изменение, сделанное между попытками. Решение — передавать `version`, это
+оставлено на потом.
+
 ## Команды
 
 | Команда | Что делает |
@@ -60,6 +134,9 @@ query {
 | `npm run typecheck` | проверка типов (`tsc`) всего кода, включая тесты |
 | `npm test` | тесты (vitest) |
 | `npm run schema:diff` | GraphQL Inspector: сравнить `schema.graphql` с версией в `origin/main` |
+
+Тесты (все с MSW): `resolvers.*-mock.test.ts` (базовые, два варианта моков), `n-plus-one.test.ts`,
+`limits.test.ts`, `reporting-failure.test.ts`, `retry.test.ts`.
 
 После `npm run gen:api` посмотри `git diff src/api/schema.d.ts`: там видно, что поменялось в контракте API.
 Если что-то поменялось, закоммить файл.
@@ -120,12 +197,19 @@ GitHub отключает `schedule` в публичном репозитори�
   добавить обязательный аргумент — breaking change; добавить поле или пометить `@deprecated` — нет.
   Проблема, которую решает: CI BFF зелёный, а UI, который использует удалённое поле, ломается.
 - **tsx** — запускает TypeScript напрямую, без отдельного шага сборки.
+- **DataLoader** — группирует загрузки в batch-запросы (N+1 → 2).
+- **GraphQL Armor** (`max-depth`, `cost-limit`) — отклоняет слишком глубокие и слишком дорогие запросы до выполнения.
+
+**Почему graphql 16, а не 17.** Плагины GraphQL Armor зависят от graphql 16 как от обычной зависимости. С graphql 17
+в проекте оказались бы две копии библиотеки, и проверка запроса падала бы на объектах «из чужой копии».
+Отсюда же `createGraphQLError` из `graphql-yoga` вместо `new GraphQLError` из `graphql`: у graphql 16 есть
+две сборки (CommonJS и ESM), и Yoga, проверяя тип ошибки, не узнавал ошибку из другой сборки. Он заменял её
+текст на `Unexpected error.`.
 
 ## Куда встроится то, что будет позже
 
 - **Auth** — в `src/server.ts` в `context` Yoga попадёт токен из заголовка запроса, резолверы передадут его в API.
 - **Pact** — тесты BFF будут записывать ожидания к API в контракт, API будет проверять его в своём CI.
-- **Reporting** — ещё один клиент рядом с `src/api/` и новые поля/резолверы в схеме.
 
 ## Эксперименты
 
